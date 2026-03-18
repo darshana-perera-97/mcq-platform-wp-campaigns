@@ -9,12 +9,48 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const PORT = Number.parseInt(process.env.PORT || "3366", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 
+const LOG_SUCCESS =
+  String(process.env.LOG_SUCCESS || "").toLowerCase() === "1" ||
+  String(process.env.LOG_SUCCESS || "").toLowerCase() === "true";
+
+function logRequestResult(req, statusCode, body) {
+  const method = req?.method ? String(req.method) : "HTTP";
+  const host = req?.headers?.host ? String(req.headers.host) : "localhost";
+  let pathname = "";
+  try {
+    pathname = new URL(req?.url || "/", `http://${host}`).pathname;
+  } catch (_) {
+    pathname = req?.url ? String(req.url) : "";
+  }
+
+  const okFlag = body && typeof body === "object" ? body.ok : undefined;
+  const hasError = statusCode >= 400 || okFlag === false || Boolean(body?.error);
+  const isSuccessAction = method === "POST" || method === "DELETE";
+  if (!hasError && (!LOG_SUCCESS || !isSuccessAction)) return;
+
+  const errorText =
+    body && typeof body === "object" && (body.error || body.message) ? String(body.error || body.message) : null;
+
+  // eslint-disable-next-line no-console
+  if (hasError) {
+    // eslint-disable-next-line no-console
+    console.error(`[backend] ${method} ${pathname} -> ${statusCode}` + (errorText ? ` | error: ${errorText}` : ""));
+  } else {
+    // eslint-disable-next-line no-console
+    console.log(`[backend] ${method} ${pathname} -> ${statusCode}`);
+  }
+}
+
 function sendJson(res, statusCode, body) {
   const json = JSON.stringify(body);
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(json),
   });
+  if (statusCode >= 400) {
+    // eslint-disable-next-line no-console
+    console.error("[backend] HTTP error ->", statusCode, body?.error || body?.message || body);
+  }
   res.end(json);
 }
 
@@ -29,6 +65,7 @@ function sendJsonCors(req, res, statusCode, body) {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(json),
   });
+  logRequestResult(req, statusCode, body);
   res.end(json);
 }
 
@@ -313,6 +350,37 @@ function resumePausedCampaigns() {
   if (changed) writeCampaigns(campaigns);
 }
 
+function pauseCampaignById(id, reason) {
+  const campaigns = readCampaigns().map(ensureCampaignSendDefaults);
+  const campaign = campaigns.find((c) => c?.id === id);
+  if (!campaign?.send) return null;
+
+  if (campaign.send.state !== "paused") {
+    campaign.send.state = "paused";
+    campaign.send.pausedAt = new Date().toISOString();
+    campaign.send.pauseReason = reason || "user_paused";
+    campaign.send.nextSendAt = null;
+    writeCampaigns(campaigns);
+  }
+
+  return campaign;
+}
+
+function resumeCampaignById(id) {
+  const campaigns = readCampaigns().map(ensureCampaignSendDefaults);
+  const campaign = campaigns.find((c) => c?.id === id);
+  if (!campaign?.send) return null;
+
+  if (campaign.send.state !== "paused") return campaign;
+
+  campaign.send.state = "running";
+  campaign.send.pauseReason = null;
+  campaign.send.pausedAt = null;
+  campaign.send.nextSendAt = new Date().toISOString();
+  writeCampaigns(campaigns);
+  return campaign;
+}
+
 function loadContactIdsSnapshot() {
   const contacts = readJsonArrayIfExists(CONTACTS_FILE_PATH);
   const ids = [];
@@ -403,6 +471,12 @@ async function runCampaignWorkerTick() {
         c.send.lastContactId = contactId;
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: true });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
+        if (LOG_SUCCESS) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[backend] campaign send ok | campaign=${c?.id || "?"} | contact=${contactId} | totalSent=${c.send.sent}`
+          );
+        }
       } catch (err) {
         const msg = err?.message ? String(err.message) : String(err);
         c.send.failed += 1;
@@ -412,6 +486,10 @@ async function runCampaignWorkerTick() {
         c.send.recentFailures = c.send.recentFailures.slice(0, 50);
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: false, error: msg });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
+        // eslint-disable-next-line no-console
+        console.error(
+          `[backend] campaign send failed | campaign=${c?.id || "?"} | contact=${contactId} | error=${msg}`
+        );
       } finally {
         c.send.currentIndex += 1;
         const processed = c.send.currentIndex;
@@ -531,8 +609,14 @@ async function refreshGroupsCache() {
       participants: g.participants,
     }));
     writeJsonArrayAtomic(filePath, arrayToStore);
+    if (LOG_SUCCESS) {
+      // eslint-disable-next-line no-console
+      console.log(`[backend] groups cache refreshed (${groups.length} groups)`);
+    }
   } catch (err) {
     groupsCache.lastError = err?.message ? String(err.message) : String(err);
+    // eslint-disable-next-line no-console
+    console.error("[backend] groups cache refresh failed:", groupsCache.lastError);
   } finally {
     groupsCache.refreshing = false;
   }
@@ -574,6 +658,8 @@ async function refreshContactsCache() {
     }
   } catch (err) {
     contactsCache.lastError = err?.message ? String(err.message) : String(err);
+    // eslint-disable-next-line no-console
+    console.error("[backend] contacts cache refresh failed:", contactsCache.lastError);
   } finally {
     contactsCache.refreshing = false;
   }
@@ -696,6 +782,19 @@ const server = http.createServer((req, res) => {
     }
 
     return sendJsonCors(req, res, 200, { ok: true, deletedId: id });
+  }
+
+  if (req.method === "POST" && url.pathname.startsWith("/api/campaigns/")) {
+    const m = url.pathname.match(/^\/api\/campaigns\/([^/]+)\/(pause|resume)$/);
+    if (m) {
+      const id = m[1];
+      const action = m[2];
+
+      const campaign = action === "pause" ? pauseCampaignById(id, "user_paused") : resumeCampaignById(id);
+      if (!campaign) return sendJsonCors(req, res, 404, { ok: false, error: "Campaign not found" });
+
+      return sendJsonCors(req, res, 200, { ok: true, campaign });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/dashboard") {

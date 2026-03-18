@@ -49,6 +49,26 @@ async function deleteCampaign(id) {
   return json;
 }
 
+async function pauseCampaign(id) {
+  const res = await fetch(`${getApiBase()}/api/campaigns/${id}/pause`, { method: 'POST' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = json?.error || res.statusText || 'Request failed';
+    throw new Error(msg);
+  }
+  return json;
+}
+
+async function resumeCampaign(id) {
+  const res = await fetch(`${getApiBase()}/api/campaigns/${id}/resume`, { method: 'POST' });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = json?.error || res.statusText || 'Request failed';
+    throw new Error(msg);
+  }
+  return json;
+}
+
 function isVideoMime(mime) {
   return typeof mime === 'string' && mime.startsWith('video/');
 }
@@ -90,6 +110,7 @@ export default function CampaignsPage() {
   const [selected, setSelected] = useState(null);
   const [detailsError, setDetailsError] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [pausing, setPausing] = useState(false);
 
   const [name, setName] = useState('');
   const [text, setText] = useState('');
@@ -164,6 +185,31 @@ export default function CampaignsPage() {
       setDetailsError(e?.message || String(e));
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function onPauseResumeSelected() {
+    if (!selectedId || !selected?.send) return;
+
+    const state = selected.send.state;
+    const isPaused = state === 'paused';
+
+    setPausing(true);
+    setDetailsError(null);
+    try {
+      if (isPaused) {
+        await resumeCampaign(selectedId);
+      } else {
+        await pauseCampaign(selectedId);
+      }
+
+      // Refresh list badges immediately.
+      setLoading(true);
+      await load();
+    } catch (e) {
+      setDetailsError(e?.message || String(e));
+    } finally {
+      setPausing(false);
     }
   }
 
@@ -318,6 +364,22 @@ export default function CampaignsPage() {
                 >
                   {deleting ? 'Deleting…' : 'Delete'}
                 </button>
+
+                {selected?.send?.state && selected.send.state !== 'completed' ? (
+                  <button
+                    type="button"
+                    className="navLink"
+                    onClick={onPauseResumeSelected}
+                    disabled={pausing}
+                    style={{
+                      borderColor: selected.send.state === 'paused' ? 'rgba(34, 197, 94, 0.25)' : 'rgba(59, 130, 246, 0.25)',
+                      background: selected.send.state === 'paused' ? 'rgba(34, 197, 94, 0.08)' : 'rgba(59, 130, 246, 0.08)',
+                    }}
+                  >
+                    {pausing ? 'Please wait…' : selected.send.state === 'paused' ? 'Continue' : 'Pause'}
+                  </button>
+                ) : null}
+
                 <button type="button" className="navLink" onClick={() => setDetailsOpen(false)}>
                   Close
                 </button>
