@@ -222,6 +222,36 @@ let campaignWorkerRunning = false;
 const CAMPAIGNS_FILE_PATH = path.join(__dirname, "data", "campaogns.json");
 const CONTACTS_FILE_PATH = path.join(__dirname, "data", "contacts.json");
 const CAMPAIGN_SEND_DELAY_MS = 60_000;
+const CAMPAIGN_BATCH_SIZE = (() => {
+  const raw = process.env.CAMPAIGN_BATCH_SIZE;
+  if (!raw) return 10;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 10;
+})();
+const CAMPAIGN_BATCH_COOLDOWN_MS = (() => {
+  const raw = process.env.CAMPAIGN_BATCH_COOLDOWN_MS;
+  if (!raw) return 10 * 60_000; // 10 minutes
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 10 * 60_000;
+})();
+const CAMPAIGN_LONG_BREAK_EVERY = (() => {
+  const raw = process.env.CAMPAIGN_LONG_BREAK_EVERY;
+  if (!raw) return 100;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 100;
+})();
+const CAMPAIGN_LONG_BREAK_MIN_MS = (() => {
+  const raw = process.env.CAMPAIGN_LONG_BREAK_MIN_MS;
+  if (!raw) return 20 * 60_000; // 20 minutes
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 20 * 60_000;
+})();
+const CAMPAIGN_LONG_BREAK_MAX_MS = (() => {
+  const raw = process.env.CAMPAIGN_LONG_BREAK_MAX_MS;
+  if (!raw) return 30 * 60_000; // 30 minutes
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 30 * 60_000;
+})();
 
 function readCampaigns() {
   return readJsonArrayIfExists(CAMPAIGNS_FILE_PATH);
@@ -350,7 +380,15 @@ async function runCampaignWorkerTick() {
         c.send.recentSends = c.send.recentSends.slice(0, 50);
       } finally {
         c.send.currentIndex += 1;
-        c.send.nextSendAt = new Date(Date.now() + CAMPAIGN_SEND_DELAY_MS).toISOString();
+        const processed = c.send.currentIndex;
+        const longBreak = processed > 0 && processed % CAMPAIGN_LONG_BREAK_EVERY === 0;
+        const cooldown = processed > 0 && processed % CAMPAIGN_BATCH_SIZE === 0;
+        const delay = longBreak
+          ? crypto.randomInt(CAMPAIGN_LONG_BREAK_MIN_MS, CAMPAIGN_LONG_BREAK_MAX_MS + 1)
+          : cooldown
+            ? CAMPAIGN_BATCH_COOLDOWN_MS
+            : CAMPAIGN_SEND_DELAY_MS;
+        c.send.nextSendAt = new Date(Date.now() + delay).toISOString();
         changed = true;
       }
 
@@ -639,6 +677,25 @@ const server = http.createServer((req, res) => {
     const contactsWithNumber = contacts.reduce((acc, c) => acc + (c?.number ? 1 : 0), 0);
     const contactsWithoutNumber = contacts.length - contactsWithNumber;
 
+    const campaignsProgress = campaigns
+      .map((c) => {
+        const send = c?.send || {};
+        const total = Number.isFinite(send.total) ? send.total : 0;
+        const completedCount = Number.isFinite(send.currentIndex) ? Math.min(total, Math.max(0, send.currentIndex)) : 0;
+        const remainingCount = Math.max(0, total - completedCount);
+        const percent = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+        return {
+          id: c?.id || null,
+          name: c?.name || null,
+          state: send.state || null,
+          completed: completedCount,
+          remaining: remainingCount,
+          percentage: percent,
+          total,
+        };
+      })
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
     return sendJsonCors(req, res, 200, {
       ok: true,
       whatsapp: {
@@ -666,6 +723,7 @@ const server = http.createServer((req, res) => {
           lastError: contactsCache.lastError,
         },
       },
+      campaignsProgress,
     });
   }
 

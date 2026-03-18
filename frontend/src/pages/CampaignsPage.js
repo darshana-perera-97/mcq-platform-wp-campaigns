@@ -64,6 +64,20 @@ function formatDuration(ms) {
   return `${sec}s`;
 }
 
+function estimateEtaMs(remaining) {
+  // Backend pacing: 1 per minute, plus 10 minutes after each 10 contacts,
+  // plus a random 20–30 min break after each 100 messages (we model as avg 25 min).
+  const perContactMs = 60_000;
+  const batchSize = 10;
+  const cooldownMs = 10 * 60_000;
+  const longBreakEvery = 100;
+  const longBreakAvgMs = 25 * 60_000;
+  const fullBatches = Math.floor(remaining / batchSize);
+  const extraCooldowns = remaining % batchSize === 0 ? Math.max(0, fullBatches - 1) : fullBatches;
+  const extraLongBreaks = Math.floor(Math.max(0, remaining - 1) / longBreakEvery);
+  return remaining * perContactMs + extraCooldowns * cooldownMs + extraLongBreaks * longBreakAvgMs;
+}
+
 export default function CampaignsPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -328,7 +342,7 @@ export default function CampaignsPage() {
                   const processed = Math.min(total, Math.max(0, currentIndex));
                   const remaining = Math.max(0, total - processed);
                   const successRate = processed > 0 ? Math.round((sent / processed) * 100) : null;
-                  const etaMs = remaining * 60_000;
+                  const etaMs = estimateEtaMs(remaining);
                   const recent = Array.isArray(send.recentSends) ? send.recentSends.slice(0, 10) : [];
 
                   return (

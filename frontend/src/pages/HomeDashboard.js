@@ -66,6 +66,7 @@ export default function HomeDashboard() {
   const counts = data?.counts || {};
   const wa = data?.whatsapp || {};
   const refresh = data?.refresh || {};
+  const campaignsProgress = Array.isArray(data?.campaignsProgress) ? data.campaignsProgress : [];
 
   return (
     <div className="card">
@@ -173,6 +174,53 @@ export default function HomeDashboard() {
             </Link>
           }
         />
+      </div>
+
+      <div className="divider" />
+
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+        <h3 style={{ margin: 0, letterSpacing: '-0.02em' }}>Campaign progress</h3>
+        <Link className="navLink" to="/campaigns">
+          Open campaigns →
+        </Link>
+      </div>
+
+      <div className="tableWrap" style={{ marginTop: 12 }}>
+        <table className="tableGrid">
+          <thead>
+            <tr>
+              <th>Campaign</th>
+              <th style={{ width: '16%' }}>Completed</th>
+              <th style={{ width: '16%' }}>Remaining</th>
+              <th style={{ width: '16%' }}>Percentage</th>
+            </tr>
+          </thead>
+          <tbody>
+            {campaignsProgress.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="muted" style={{ padding: 14 }}>
+                  No campaigns yet.
+                </td>
+              </tr>
+            ) : (
+              campaignsProgress.map((c) => (
+                <tr key={c.id || c.name}>
+                  <td style={{ fontWeight: 700 }}>
+                    {c.name || '—'}{' '}
+                    {c.state ? (
+                      <span className={`badge ${c.state === 'completed' ? 'badgeOk' : c.state === 'running' || c.state === 'queued' ? 'badgeWarn' : 'badgeErr'}`}>
+                        {c.state}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td className="mono">{c.completed ?? '—'}</td>
+                  <td className="mono">{c.remaining ?? '—'}</td>
+                  <td className="mono">{typeof c.percentage === 'number' ? `${c.percentage}%` : '—'}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
