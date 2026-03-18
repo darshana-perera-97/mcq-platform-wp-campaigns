@@ -263,7 +263,7 @@ function writeCampaigns(campaigns) {
 
 function ensureCampaignSendDefaults(c) {
   if (!c.send) c.send = {};
-  if (!c.send.state) c.send.state = "queued"; // queued | running | completed | error
+  if (!c.send.state) c.send.state = "queued"; // queued | running | paused | completed | error
   if (!Array.isArray(c.send.contactIds)) c.send.contactIds = null;
   if (typeof c.send.currentIndex !== "number") c.send.currentIndex = 0;
   if (typeof c.send.sent !== "number") c.send.sent = 0;
@@ -276,7 +276,41 @@ function ensureCampaignSendDefaults(c) {
   if (!c.send.lastContactId) c.send.lastContactId = null;
   if (!Array.isArray(c.send.recentFailures)) c.send.recentFailures = [];
   if (!Array.isArray(c.send.recentSends)) c.send.recentSends = [];
+  if (!c.send.pausedAt) c.send.pausedAt = null;
+  if (!c.send.pauseReason) c.send.pauseReason = null;
   return c;
+}
+
+function pauseRunningCampaigns(reason) {
+  const campaigns = readCampaigns().map(ensureCampaignSendDefaults);
+  let changed = false;
+  for (const c of campaigns) {
+    if (!c?.send) continue;
+    if (c.send.state === "running") {
+      c.send.state = "paused";
+      c.send.pausedAt = new Date().toISOString();
+      c.send.pauseReason = reason || "whatsapp_disconnected";
+      c.send.nextSendAt = null;
+      changed = true;
+    }
+  }
+  if (changed) writeCampaigns(campaigns);
+}
+
+function resumePausedCampaigns() {
+  const campaigns = readCampaigns().map(ensureCampaignSendDefaults);
+  let changed = false;
+  for (const c of campaigns) {
+    if (!c?.send) continue;
+    if (c.send.state === "paused") {
+      c.send.state = "running";
+      c.send.pauseReason = null;
+      c.send.pausedAt = null;
+      c.send.nextSendAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) writeCampaigns(campaigns);
 }
 
 function loadContactIdsSnapshot() {
@@ -486,7 +520,7 @@ async function refreshGroupsCache() {
   if (groupsCache.refreshing) return;
   groupsCache.refreshing = true;
   try {
-    const groups = await withTimeout(getWaGroups(), 25000, "getWaGroups()");
+    const groups = await withTimeout(getWaGroups(), 120000, "getWaGroups()");
     groupsCache.groups = groups;
     groupsCache.lastUpdatedAt = new Date().toISOString();
     groupsCache.lastError = null;
@@ -1009,6 +1043,7 @@ waClient.on("ready", () => {
   refreshGroupsCache();
   refreshContactsCache();
   startRescrapeScheduler();
+  resumePausedCampaigns();
   startCampaignWorker();
 });
 
@@ -1023,6 +1058,8 @@ waClient.on("auth_failure", (msg) => {
   waStatus.state = "auth_failure";
   // eslint-disable-next-line no-console
   console.error("WhatsApp auth failure:", msg);
+  pauseRunningCampaigns("auth_failure");
+  stopCampaignWorker();
 });
 
 waClient.on("disconnected", (reason) => {
@@ -1032,6 +1069,7 @@ waClient.on("disconnected", (reason) => {
   // eslint-disable-next-line no-console
   console.warn("WhatsApp client disconnected:", reason);
   stopRescrapeScheduler();
+  pauseRunningCampaigns(reason || "disconnected");
   stopCampaignWorker();
 });
 
