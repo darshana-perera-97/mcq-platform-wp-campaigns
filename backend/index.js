@@ -313,6 +313,7 @@ function ensureCampaignSendDefaults(c) {
   if (!c.send.lastContactId) c.send.lastContactId = null;
   if (!Array.isArray(c.send.recentFailures)) c.send.recentFailures = [];
   if (!Array.isArray(c.send.recentSends)) c.send.recentSends = [];
+  if (!Array.isArray(c.send.sentContactIds)) c.send.sentContactIds = [];
   if (!c.send.pausedAt) c.send.pausedAt = null;
   if (!c.send.pauseReason) c.send.pauseReason = null;
   return c;
@@ -334,16 +335,31 @@ function pauseRunningCampaigns(reason) {
   if (changed) writeCampaigns(campaigns);
 }
 
+function rebuildCampaignContactListToFailedAndUnsent(c) {
+  if (!c?.send) return;
+  const sentIds = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
+  const currentIds = Array.isArray(c.send.contactIds) ? c.send.contactIds : [];
+  // Only rebuild when we have a sent list (new behavior); otherwise keep current position (backward compat).
+  if (sentIds.length > 0) {
+    const sentSet = new Set(sentIds);
+    const remaining = currentIds.filter((id) => id && !sentSet.has(id));
+    c.send.contactIds = remaining;
+    c.send.total = remaining.length;
+    c.send.currentIndex = 0;
+  }
+  c.send.nextSendAt = new Date().toISOString();
+}
+
 function resumePausedCampaigns() {
   const campaigns = readCampaigns().map(ensureCampaignSendDefaults);
   let changed = false;
   for (const c of campaigns) {
     if (!c?.send) continue;
     if (c.send.state === "paused") {
+      rebuildCampaignContactListToFailedAndUnsent(c);
       c.send.state = "running";
       c.send.pauseReason = null;
       c.send.pausedAt = null;
-      c.send.nextSendAt = new Date().toISOString();
       changed = true;
     }
   }
@@ -373,12 +389,48 @@ function resumeCampaignById(id) {
 
   if (campaign.send.state !== "paused") return campaign;
 
+  rebuildCampaignContactListToFailedAndUnsent(campaign);
   campaign.send.state = "running";
   campaign.send.pauseReason = null;
   campaign.send.pausedAt = null;
-  campaign.send.nextSendAt = new Date().toISOString();
   writeCampaigns(campaigns);
   return campaign;
+}
+
+function isDetachedFrameError(err) {
+  const msg = err?.message ? String(err.message) : String(err);
+  const m = msg.toLowerCase();
+  return m.includes("attempted to use detached frame") || (m.includes("detached frame") && m.includes("attempted"));
+}
+
+let waReinitializeInProgress = false;
+
+async function forceWhatsAppReinitialize(reason) {
+  if (waReinitializeInProgress) return;
+  waReinitializeInProgress = true;
+  try {
+    const msg = reason ? String(reason) : "forceWhatsAppReinitialize()";
+    waStatus.lastError = msg;
+    waStatus.state = "reinitializing";
+    stopRescrapeScheduler();
+    stopCampaignWorker();
+    pauseRunningCampaigns("detached_frame");
+
+    try {
+      await waClient.destroy();
+    } catch (_) {
+      // If the browser already crashed, destroy may throw; continue with initialize.
+    }
+
+    await waClient.initialize();
+  } catch (err) {
+    waStatus.lastError = err?.message ? String(err.message) : String(err);
+    waStatus.state = "init_error";
+    // eslint-disable-next-line no-console
+    console.error("WhatsApp reinitialize error:", waStatus.lastError);
+  } finally {
+    waReinitializeInProgress = false;
+  }
 }
 
 function loadContactIdsSnapshot() {
@@ -469,6 +521,8 @@ async function runCampaignWorkerTick() {
         c.send.sent += 1;
         c.send.lastError = null;
         c.send.lastContactId = contactId;
+        if (!c.send.sentContactIds) c.send.sentContactIds = [];
+        c.send.sentContactIds.push(contactId);
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: true });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
         if (LOG_SUCCESS) {
@@ -490,6 +544,12 @@ async function runCampaignWorkerTick() {
         console.error(
           `[backend] campaign send failed | campaign=${c?.id || "?"} | contact=${contactId} | error=${msg}`
         );
+
+        if (isDetachedFrameError(err)) {
+          // eslint-disable-next-line no-console
+          console.error("[backend] Detected detached Frame error; forcing WhatsApp reinitialize.");
+          void forceWhatsAppReinitialize(msg);
+        }
       } finally {
         c.send.currentIndex += 1;
         const processed = c.send.currentIndex;

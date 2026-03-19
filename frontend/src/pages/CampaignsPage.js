@@ -340,12 +340,13 @@ export default function CampaignsPage() {
           className="modalOverlay"
           role="dialog"
           aria-modal="true"
+          aria-label="Campaign analytics"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) setDetailsOpen(false);
           }}
         >
-          <div className="modalCard">
-            <div className="cardHeader" style={{ marginBottom: 8 }}>
+          <div className="modalCard modalCard--analytics">
+            <div className="modalCard__header cardHeader" style={{ marginBottom: 8 }}>
               <div>
                 <h2 className="pageTitle" style={{ marginBottom: 2 }}>
                   Campaign analytics
@@ -354,7 +355,7 @@ export default function CampaignsPage() {
                   Live status while sending in background.
                 </p>
               </div>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button
                   type="button"
                   className="navLink"
@@ -386,6 +387,7 @@ export default function CampaignsPage() {
               </div>
             </div>
 
+            <div className="modalCard__body">
             {detailsError ? (
               <div className="alert">
                 <div className="alertTitle">Could not load analytics</div>
@@ -486,6 +488,7 @@ export default function CampaignsPage() {
             ) : (
               <p className="muted">Loading…</p>
             )}
+            </div>
           </div>
         </div>
       ) : null}
