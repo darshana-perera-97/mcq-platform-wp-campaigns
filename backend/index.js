@@ -341,8 +341,8 @@ function rebuildCampaignContactListToFailedAndUnsent(c) {
   const currentIds = Array.isArray(c.send.contactIds) ? c.send.contactIds : [];
   // Only rebuild when we have a sent list (new behavior); otherwise keep current position (backward compat).
   if (sentIds.length > 0) {
-    const sentSet = new Set(sentIds);
-    const remaining = currentIds.filter((id) => id && !sentSet.has(id));
+    const sentSet = new Set(sentIds.map((id) => normalizeContactId(id)));
+    const remaining = currentIds.filter((id) => id && !sentSet.has(normalizeContactId(id)));
     c.send.contactIds = remaining;
     c.send.total = remaining.length;
     c.send.currentIndex = 0;
@@ -433,6 +433,15 @@ async function forceWhatsAppReinitialize(reason) {
   }
 }
 
+function normalizeContactId(id) {
+  if (id == null || typeof id !== "string") return "";
+  const s = String(id).trim();
+  const at = s.indexOf("@");
+  if (at <= 0) return s;
+  const number = s.slice(0, at).replace(/\D/g, "") || s.slice(0, at);
+  return number ? `${number}@c.us` : s;
+}
+
 function loadContactIdsSnapshot() {
   const contacts = readJsonArrayIfExists(CONTACTS_FILE_PATH);
   const ids = [];
@@ -484,6 +493,14 @@ async function runCampaignWorkerTick() {
       if (c.send.state !== "queued" && c.send.state !== "running") continue;
 
       if (!Array.isArray(c.send.contactIds) || c.send.contactIds.length === 0) {
+        const sentIds = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
+        if (sentIds.length > 0) {
+          c.send.state = "completed";
+          c.send.finishedAt = c.send.finishedAt || new Date().toISOString();
+          c.send.nextSendAt = null;
+          changed = true;
+          continue;
+        }
         const ids = loadContactIdsSnapshot();
         c.send.contactIds = ids;
         c.send.total = ids.length;
@@ -516,8 +533,10 @@ async function runCampaignWorkerTick() {
         continue;
       }
 
-      const sentSet = new Set(Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : []);
-      if (sentSet.has(contactId)) {
+      const sentList = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
+      const sentSet = new Set(sentList.map((id) => normalizeContactId(id)));
+      const contactIdNorm = normalizeContactId(contactId);
+      if (contactIdNorm && sentSet.has(contactIdNorm)) {
         c.send.currentIndex += 1;
         c.send.nextSendAt = new Date(Date.now() + CAMPAIGN_SEND_DELAY_MS).toISOString();
         changed = true;
@@ -530,7 +549,7 @@ async function runCampaignWorkerTick() {
         c.send.lastError = null;
         c.send.lastContactId = contactId;
         if (!c.send.sentContactIds) c.send.sentContactIds = [];
-        c.send.sentContactIds.push(contactId);
+        if (!sentSet.has(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: true });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
         if (LOG_SUCCESS) {
