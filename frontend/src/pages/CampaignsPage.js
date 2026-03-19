@@ -112,6 +112,7 @@ export default function CampaignsPage() {
   const [deleting, setDeleting] = useState(false);
   const [pausing, setPausing] = useState(false);
   const [pausingCardId, setPausingCardId] = useState(null);
+  const [sentListOpen, setSentListOpen] = useState(false);
 
   const [name, setName] = useState('');
   const [text, setText] = useState('');
@@ -136,6 +137,10 @@ export default function CampaignsPage() {
     load({ signal: ac.signal });
     return () => ac.abort();
   }, []);
+
+  useEffect(() => {
+    if (!detailsOpen) setSentListOpen(false);
+  }, [detailsOpen]);
 
   const campaigns = Array.isArray(data?.campaigns) ? data.campaigns : [];
 
@@ -320,6 +325,7 @@ export default function CampaignsPage() {
                   setSelectedId(c.id);
                   setSelected(null);
                   setDetailsError(null);
+                  setSentListOpen(false);
                   setDetailsOpen(true);
                 }}
                 onKeyDown={(e) => {
@@ -328,6 +334,7 @@ export default function CampaignsPage() {
                     setSelectedId(c.id);
                     setSelected(null);
                     setDetailsError(null);
+                    setSentListOpen(false);
                     setDetailsOpen(true);
                   }
                 }}
@@ -393,7 +400,10 @@ export default function CampaignsPage() {
           aria-modal="true"
           aria-label="Campaign analytics"
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setDetailsOpen(false);
+            if (e.target === e.currentTarget) {
+              setSentListOpen(false);
+              setDetailsOpen(false);
+            }
           }}
         >
           <div className="modalCard modalCard--analytics">
@@ -432,7 +442,28 @@ export default function CampaignsPage() {
                   </button>
                 ) : null}
 
-                <button type="button" className="navLink" onClick={() => setDetailsOpen(false)}>
+                {Array.isArray(selected?.send?.sentNumbers) && selected.send.sentNumbers.length > 0 ? (
+                  <button
+                    type="button"
+                    className="navLink"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSentListOpen(true);
+                    }}
+                    style={{ borderColor: 'rgba(37, 99, 235, 0.25)', background: 'rgba(37, 99, 235, 0.08)' }}
+                  >
+                    Sent ({selected.send.sentNumbers.length})
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  className="navLink"
+                  onClick={() => {
+                    setSentListOpen(false);
+                    setDetailsOpen(false);
+                  }}
+                >
                   Close
                 </button>
               </div>
@@ -540,6 +571,53 @@ export default function CampaignsPage() {
               <p className="muted">Loading…</p>
             )}
             </div>
+
+            {sentListOpen && selected ? (
+              <div
+                className="modalOverlay"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Sent contacts list"
+                style={{ zIndex: 60 }}
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget) setSentListOpen(false);
+                }}
+              >
+                <div className="modalCard" style={{ maxWidth: 620 }}>
+                  <div className="cardHeader" style={{ marginBottom: 8 }}>
+                    <div>
+                      <h2 className="pageTitle" style={{ marginBottom: 2 }}>
+                        Successfully sent
+                      </h2>
+                      <p className="pageSubtitle" style={{ marginBottom: 0 }}>
+                        Numbers already messaged by this campaign
+                      </p>
+                    </div>
+                    <button type="button" className="navLink" onClick={() => setSentListOpen(false)}>
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="muted" style={{ marginBottom: 10 }}>
+                    Total: <span className="mono">{selected?.send?.sentNumbers?.length || 0}</span>
+                  </div>
+
+                  <div style={{ maxHeight: '60vh', overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                    {Array.isArray(selected?.send?.sentNumbers) && selected.send.sentNumbers.length > 0 ? (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        {selected.send.sentNumbers.map((n, idx) => (
+                          <span key={`${n}-${idx}`} className="badge">
+                            <span className="mono">{n}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="muted">No sent numbers yet.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

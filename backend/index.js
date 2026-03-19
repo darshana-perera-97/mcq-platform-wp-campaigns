@@ -315,6 +315,7 @@ function ensureCampaignSendDefaults(c) {
   if (!Array.isArray(c.send.recentFailures)) c.send.recentFailures = [];
   if (!Array.isArray(c.send.recentSends)) c.send.recentSends = [];
   if (!Array.isArray(c.send.sentContactIds)) c.send.sentContactIds = [];
+  if (!Array.isArray(c.send.sentNumbers)) c.send.sentNumbers = [];
   if (!Array.isArray(c.send.failedContactIds)) c.send.failedContactIds = [];
   if (!c.send.pausedAt) c.send.pausedAt = null;
   if (!c.send.pauseReason) c.send.pauseReason = null;
@@ -357,6 +358,34 @@ function rebuildCampaignContactListToFailedAndUnsent(c) {
 
   const sentSet = new Set([...sentIds, ...recentOkSent].map((id) => normalizeContactId(id)).filter(Boolean));
   const failedSet = new Set([...failedIds, ...recentFailures].map((id) => normalizeContactId(id)).filter(Boolean));
+
+  // Ensure sentNumbers exists/persists when older campaigns have sentContactIds but not sentNumbers.
+  if (!Array.isArray(c.send.sentNumbers) || c.send.sentNumbers.length === 0) {
+    const nums = [...sentIds, ...recentOkSent]
+      .map((id) => contactIdToNumber(id))
+      .filter(Boolean);
+    if (!Array.isArray(c.send.sentNumbers)) c.send.sentNumbers = [];
+    for (const n of nums) {
+      if (!c.send.sentNumbers.includes(n)) c.send.sentNumbers.push(n);
+    }
+  }
+
+  // Bootstrap missing sent history:
+  // For contacts we already attempted (index < currentIndex), treat anything not in failedSet as "sent",
+  // so we never retry them on a later resume even if sentContactIds history is incomplete.
+  const derivedSent = new Set();
+  if (originalIndex > 0) {
+    for (let i = 0; i < originalIds.length && i < originalIndex; i += 1) {
+      const norm = normalizeContactId(originalIds[i]);
+      if (!norm) continue;
+      if (failedSet.has(norm)) continue;
+      derivedSent.add(norm);
+    }
+  }
+  for (const id of derivedSent) {
+    markCampaignSentContact(c, id);
+    markDeviceSentContact(id);
+  }
 
   // If we have no known sent history and the worker thinks nothing was processed yet,
   // rebuilding would likely re-send old successes. In that case, keep the current pointer.
@@ -483,6 +512,13 @@ function normalizeContactId(id) {
   return number ? `${number}@c.us` : s;
 }
 
+function contactIdToNumber(contactId) {
+  const norm = normalizeContactId(contactId);
+  const at = norm.indexOf("@");
+  if (at <= 0) return "";
+  return norm.slice(0, at);
+}
+
 let deviceSentContactIds = new Set();
 let deviceSentContactsDirty = false;
 let deviceSentContactsFlushInterval = null;
@@ -507,6 +543,16 @@ function markDeviceSentContact(contactId) {
     deviceSentContactIds.add(norm);
     deviceSentContactsDirty = true;
   }
+}
+
+function markCampaignSentContact(c, contactIdNorm) {
+  if (!c?.send) return;
+  if (!c.send.sentContactIds) c.send.sentContactIds = [];
+  if (!c.send.sentNumbers) c.send.sentNumbers = [];
+  if (!contactIdNorm) return;
+  if (!c.send.sentContactIds.includes(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
+  const number = contactIdToNumber(contactIdNorm);
+  if (number && !c.send.sentNumbers.includes(number)) c.send.sentNumbers.push(number);
 }
 
 function loadContactIdsSnapshot() {
@@ -568,6 +614,12 @@ async function runCampaignWorkerTick() {
             : [];
         const norm = recentOkSent.map((id) => normalizeContactId(id)).filter(Boolean);
         c.send.sentContactIds = Array.from(new Set(norm));
+        // Ensure sentNumbers is persisted too.
+        if (!Array.isArray(c.send.sentNumbers)) c.send.sentNumbers = [];
+        for (const contactIdNorm of c.send.sentContactIds) {
+          const number = contactIdToNumber(contactIdNorm);
+          if (number && !c.send.sentNumbers.includes(number)) c.send.sentNumbers.push(number);
+        }
       }
       if (!Array.isArray(c.send.failedContactIds) || c.send.failedContactIds.length === 0) {
         const recentFailures =
@@ -576,6 +628,17 @@ async function runCampaignWorkerTick() {
             : [];
         const norm = recentFailures.map((id) => normalizeContactId(id)).filter(Boolean);
         c.send.failedContactIds = Array.from(new Set(norm));
+      }
+
+      // Ensure sentNumbers is persisted even if sentContactIds was already present.
+      if (Array.isArray(c.send.sentContactIds) && c.send.sentContactIds.length > 0) {
+        if (!Array.isArray(c.send.sentNumbers) || c.send.sentNumbers.length === 0) {
+          c.send.sentNumbers = [];
+          for (const id of c.send.sentContactIds) {
+            const n = contactIdToNumber(id);
+            if (n && !c.send.sentNumbers.includes(n)) c.send.sentNumbers.push(n);
+          }
+        }
       }
 
       if (!Array.isArray(c.send.contactIds) || c.send.contactIds.length === 0) {
@@ -635,9 +698,10 @@ async function runCampaignWorkerTick() {
         c.send.sent += 1;
         c.send.lastError = null;
         c.send.lastContactId = contactId;
-        if (!c.send.sentContactIds) c.send.sentContactIds = [];
-        if (contactIdNorm && !sentSet.has(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
-        markDeviceSentContact(contactIdNorm);
+        if (contactIdNorm && !sentSet.has(contactIdNorm)) {
+          markCampaignSentContact(c, contactIdNorm);
+          markDeviceSentContact(contactIdNorm);
+        }
         if (Array.isArray(c.send.failedContactIds) && contactIdNorm) {
           // If it previously failed, a later success should not be retried.
           c.send.failedContactIds = c.send.failedContactIds.filter((x) => x !== contactIdNorm);
