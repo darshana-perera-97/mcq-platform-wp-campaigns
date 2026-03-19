@@ -314,6 +314,7 @@ function ensureCampaignSendDefaults(c) {
   if (!Array.isArray(c.send.recentFailures)) c.send.recentFailures = [];
   if (!Array.isArray(c.send.recentSends)) c.send.recentSends = [];
   if (!Array.isArray(c.send.sentContactIds)) c.send.sentContactIds = [];
+  if (!Array.isArray(c.send.failedContactIds)) c.send.failedContactIds = [];
   if (!c.send.pausedAt) c.send.pausedAt = null;
   if (!c.send.pauseReason) c.send.pauseReason = null;
   return c;
@@ -337,16 +338,50 @@ function pauseRunningCampaigns(reason) {
 
 function rebuildCampaignContactListToFailedAndUnsent(c) {
   if (!c?.send) return;
+  const originalIds = Array.isArray(c.send.contactIds) ? c.send.contactIds : [];
+  const originalIndex = Number.isFinite(c.send.currentIndex) ? c.send.currentIndex : 0;
+
   const sentIds = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
-  const currentIds = Array.isArray(c.send.contactIds) ? c.send.contactIds : [];
-  // Only rebuild when we have a sent list (new behavior); otherwise keep current position (backward compat).
-  if (sentIds.length > 0) {
-    const sentSet = new Set(sentIds.map((id) => normalizeContactId(id)));
-    const remaining = currentIds.filter((id) => id && !sentSet.has(normalizeContactId(id)));
-    c.send.contactIds = remaining;
-    c.send.total = remaining.length;
-    c.send.currentIndex = 0;
+  const failedIds = Array.isArray(c.send.failedContactIds) ? c.send.failedContactIds : [];
+
+  // Backfill sent/failed from recent activity for older campaigns (history before this feature).
+  const recentOkSent =
+    Array.isArray(c.send.recentSends) && c.send.recentSends.length > 0
+      ? c.send.recentSends.filter((x) => x?.ok === true && x?.contactId).map((x) => x.contactId)
+      : [];
+  const recentFailures =
+    Array.isArray(c.send.recentFailures) && c.send.recentFailures.length > 0
+      ? c.send.recentFailures.filter((x) => x?.contactId).map((x) => x.contactId)
+      : [];
+
+  const sentSet = new Set([...sentIds, ...recentOkSent].map((id) => normalizeContactId(id)).filter(Boolean));
+  const failedSet = new Set([...failedIds, ...recentFailures].map((id) => normalizeContactId(id)).filter(Boolean));
+
+  // If we have no known sent history and the worker thinks nothing was processed yet,
+  // rebuilding would likely re-send old successes. In that case, keep the current pointer.
+  if (sentSet.size === 0 && originalIndex <= 0) {
+    c.send.nextSendAt = new Date().toISOString();
+    return;
   }
+
+  const remaining = [];
+  for (let i = 0; i < originalIds.length; i += 1) {
+    const id = originalIds[i];
+    const norm = normalizeContactId(id);
+    if (!norm) continue;
+    if (sentSet.has(norm)) continue;
+
+    if (i < originalIndex) {
+      // Already attempted. Only retry if we know it's a failure.
+      if (!failedSet.has(norm)) continue;
+    }
+
+    remaining.push(id);
+  }
+
+  c.send.contactIds = remaining;
+  c.send.total = remaining.length;
+  c.send.currentIndex = 0;
   c.send.nextSendAt = new Date().toISOString();
 }
 
@@ -492,6 +527,25 @@ async function runCampaignWorkerTick() {
       if (!c?.send) continue;
       if (c.send.state !== "queued" && c.send.state !== "running") continue;
 
+      // Backfill sent/failed history from recent activity when older campaigns
+      // don't have the new sentContactIds/failedContactIds fields yet.
+      if (!Array.isArray(c.send.sentContactIds) || c.send.sentContactIds.length === 0) {
+        const recentOkSent =
+          Array.isArray(c.send.recentSends) && c.send.recentSends.length > 0
+            ? c.send.recentSends.filter((x) => x?.ok === true && x?.contactId).map((x) => x.contactId)
+            : [];
+        const norm = recentOkSent.map((id) => normalizeContactId(id)).filter(Boolean);
+        c.send.sentContactIds = Array.from(new Set(norm));
+      }
+      if (!Array.isArray(c.send.failedContactIds) || c.send.failedContactIds.length === 0) {
+        const recentFailures =
+          Array.isArray(c.send.recentFailures) && c.send.recentFailures.length > 0
+            ? c.send.recentFailures.filter((x) => x?.contactId).map((x) => x.contactId)
+            : [];
+        const norm = recentFailures.map((id) => normalizeContactId(id)).filter(Boolean);
+        c.send.failedContactIds = Array.from(new Set(norm));
+      }
+
       if (!Array.isArray(c.send.contactIds) || c.send.contactIds.length === 0) {
         const sentIds = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
         if (sentIds.length > 0) {
@@ -549,7 +603,11 @@ async function runCampaignWorkerTick() {
         c.send.lastError = null;
         c.send.lastContactId = contactId;
         if (!c.send.sentContactIds) c.send.sentContactIds = [];
-        if (!sentSet.has(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
+        if (contactIdNorm && !sentSet.has(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
+        if (Array.isArray(c.send.failedContactIds) && contactIdNorm) {
+          // If it previously failed, a later success should not be retried.
+          c.send.failedContactIds = c.send.failedContactIds.filter((x) => x !== contactIdNorm);
+        }
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: true });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
         if (LOG_SUCCESS) {
@@ -567,6 +625,11 @@ async function runCampaignWorkerTick() {
         c.send.recentFailures = c.send.recentFailures.slice(0, 50);
         c.send.recentSends.unshift({ at: new Date().toISOString(), contactId, ok: false, error: msg });
         c.send.recentSends = c.send.recentSends.slice(0, 50);
+
+        if (!c.send.failedContactIds) c.send.failedContactIds = [];
+        const contactIdNorm = normalizeContactId(contactId);
+        if (contactIdNorm && !c.send.failedContactIds.includes(contactIdNorm)) c.send.failedContactIds.push(contactIdNorm);
+
         // eslint-disable-next-line no-console
         console.error(
           `[backend] campaign send failed | campaign=${c?.id || "?"} | contact=${contactId} | error=${msg}`
