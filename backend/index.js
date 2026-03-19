@@ -258,6 +258,7 @@ let campaignWorkerRunning = false;
 
 const CAMPAIGNS_FILE_PATH = path.join(__dirname, "data", "campaogns.json");
 const CONTACTS_FILE_PATH = path.join(__dirname, "data", "contacts.json");
+const DEVICE_SENT_CONTACTS_FILE_PATH = path.join(__dirname, "data", "device_sent_contacts.json");
 const CAMPAIGN_SEND_DELAY_MS = 60_000;
 const CAMPAIGN_BATCH_SIZE = (() => {
   const raw = process.env.CAMPAIGN_BATCH_SIZE;
@@ -379,7 +380,12 @@ function rebuildCampaignContactListToFailedAndUnsent(c) {
     remaining.push(id);
   }
 
-  c.send.contactIds = remaining;
+  // Also ensure we only send to contacts that haven't received any message from this device before.
+  if (deviceSentContactIds && deviceSentContactIds.size > 0) {
+    c.send.contactIds = remaining.filter((id) => !deviceSentContactIds.has(normalizeContactId(id)));
+  } else {
+    c.send.contactIds = remaining;
+  }
   c.send.total = remaining.length;
   c.send.currentIndex = 0;
   c.send.nextSendAt = new Date().toISOString();
@@ -477,6 +483,32 @@ function normalizeContactId(id) {
   return number ? `${number}@c.us` : s;
 }
 
+let deviceSentContactIds = new Set();
+let deviceSentContactsDirty = false;
+let deviceSentContactsFlushInterval = null;
+
+function loadDeviceSentContactsFromDisk() {
+  const ids = readJsonArrayIfExists(DEVICE_SENT_CONTACTS_FILE_PATH);
+  deviceSentContactIds = new Set(ids.map((id) => normalizeContactId(id)).filter(Boolean));
+  deviceSentContactsDirty = false;
+}
+
+function flushDeviceSentContactsToDisk() {
+  if (!deviceSentContactsDirty) return;
+  const items = Array.from(deviceSentContactIds);
+  writeJsonArrayAtomic(DEVICE_SENT_CONTACTS_FILE_PATH, items);
+  deviceSentContactsDirty = false;
+}
+
+function markDeviceSentContact(contactId) {
+  const norm = normalizeContactId(contactId);
+  if (!norm) return;
+  if (!deviceSentContactIds.has(norm)) {
+    deviceSentContactIds.add(norm);
+    deviceSentContactsDirty = true;
+  }
+}
+
 function loadContactIdsSnapshot() {
   const contacts = readJsonArrayIfExists(CONTACTS_FILE_PATH);
   const ids = [];
@@ -556,8 +588,9 @@ async function runCampaignWorkerTick() {
           continue;
         }
         const ids = loadContactIdsSnapshot();
-        c.send.contactIds = ids;
-        c.send.total = ids.length;
+        const filtered = deviceSentContactIds && deviceSentContactIds.size > 0 ? ids.filter((id) => !deviceSentContactIds.has(normalizeContactId(id))) : ids;
+        c.send.contactIds = filtered;
+        c.send.total = filtered.length;
         c.send.currentIndex = 0;
         c.send.sent = 0;
         c.send.failed = 0;
@@ -590,7 +623,7 @@ async function runCampaignWorkerTick() {
       const sentList = Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : [];
       const sentSet = new Set(sentList.map((id) => normalizeContactId(id)));
       const contactIdNorm = normalizeContactId(contactId);
-      if (contactIdNorm && sentSet.has(contactIdNorm)) {
+      if ((contactIdNorm && sentSet.has(contactIdNorm)) || (contactIdNorm && deviceSentContactIds && deviceSentContactIds.has(contactIdNorm))) {
         c.send.currentIndex += 1;
         c.send.nextSendAt = new Date(Date.now() + CAMPAIGN_SEND_DELAY_MS).toISOString();
         changed = true;
@@ -604,6 +637,7 @@ async function runCampaignWorkerTick() {
         c.send.lastContactId = contactId;
         if (!c.send.sentContactIds) c.send.sentContactIds = [];
         if (contactIdNorm && !sentSet.has(contactIdNorm)) c.send.sentContactIds.push(contactIdNorm);
+        markDeviceSentContact(contactIdNorm);
         if (Array.isArray(c.send.failedContactIds) && contactIdNorm) {
           // If it previously failed, a later success should not be retried.
           c.send.failedContactIds = c.send.failedContactIds.filter((x) => x !== contactIdNorm);
@@ -1288,6 +1322,17 @@ waClient.on("ready", () => {
   // eslint-disable-next-line no-console
   console.log("WhatsApp client is ready.");
 
+  // Load device-level sent history so we only message fresh contacts.
+  loadDeviceSentContactsFromDisk();
+  if (deviceSentContactsFlushInterval) clearInterval(deviceSentContactsFlushInterval);
+  deviceSentContactsFlushInterval = setInterval(() => {
+    try {
+      flushDeviceSentContactsToDisk();
+    } catch (_) {
+      // ignore
+    }
+  }, 10_000);
+
   // Warm groups cache in background so UI loads fast.
   refreshGroupsCache();
   refreshContactsCache();
@@ -1352,6 +1397,7 @@ async function shutdown() {
   stopRescrapeScheduler();
   stopCampaignWorker();
   releaseWaLock();
+  flushDeviceSentContactsToDisk();
   try {
     server.close();
   } catch (_) {
