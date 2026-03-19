@@ -516,6 +516,14 @@ async function runCampaignWorkerTick() {
         continue;
       }
 
+      const sentSet = new Set(Array.isArray(c.send.sentContactIds) ? c.send.sentContactIds : []);
+      if (sentSet.has(contactId)) {
+        c.send.currentIndex += 1;
+        c.send.nextSendAt = new Date(Date.now() + CAMPAIGN_SEND_DELAY_MS).toISOString();
+        changed = true;
+        continue;
+      }
+
       try {
         await withTimeout(sendCampaignToContact(c, contactId), 20000, "sendCampaignToContact()");
         c.send.sent += 1;

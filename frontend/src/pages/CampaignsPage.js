@@ -111,6 +111,7 @@ export default function CampaignsPage() {
   const [detailsError, setDetailsError] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [pausing, setPausing] = useState(false);
+  const [pausingCardId, setPausingCardId] = useState(null);
 
   const [name, setName] = useState('');
   const [text, setText] = useState('');
@@ -213,6 +214,26 @@ export default function CampaignsPage() {
     }
   }
 
+  async function onCardPauseResume(campaignId, currentState) {
+    if (!campaignId) return;
+    const isPaused = currentState === 'paused';
+
+    setPausingCardId(campaignId);
+    try {
+      if (isPaused) {
+        await resumeCampaign(campaignId);
+      } else {
+        await pauseCampaign(campaignId);
+      }
+      setLoading(true);
+      await load();
+    } catch (e) {
+      setError(e?.message || String(e));
+    } finally {
+      setPausingCardId(null);
+    }
+  }
+
   useEffect(() => {
     if (!detailsOpen || !selectedId) return undefined;
     let alive = true;
@@ -285,10 +306,14 @@ export default function CampaignsPage() {
             const sent = typeof send?.sent === 'number' ? send.sent : null;
             const badge =
               state === 'completed' ? 'badgeOk' : state === 'running' || state === 'queued' ? 'badgeWarn' : 'badgeErr';
+            const showPauseContinue = state === 'running' || state === 'queued' || state === 'paused';
+            const isPauseResumeLoading = pausingCardId === c.id;
+
             return (
-              <button
+              <div
                 key={c.id}
-                type="button"
+                role="button"
+                tabIndex={0}
                 className="miniCard"
                 style={{ textAlign: 'left', cursor: 'pointer' }}
                 onClick={() => {
@@ -296,6 +321,15 @@ export default function CampaignsPage() {
                   setSelected(null);
                   setDetailsError(null);
                   setDetailsOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setSelectedId(c.id);
+                    setSelected(null);
+                    setDetailsError(null);
+                    setDetailsOpen(true);
+                  }
                 }}
               >
                 <div className="cardMeta">
@@ -309,7 +343,7 @@ export default function CampaignsPage() {
                 {mediaUrl ? (
                   <div className="mediaBox" style={{ marginTop: 12 }}>
                     {isVideoMime(mime) ? (
-                      <video src={mediaUrl} controls className="mediaPreview" />
+                      <video src={mediaUrl} controls className="mediaPreview" onClick={(e) => e.stopPropagation()} />
                     ) : (
                       <img src={mediaUrl} alt="Campaign media" className="mediaPreview" />
                     )}
@@ -324,12 +358,29 @@ export default function CampaignsPage() {
                         <span className="mono">{sent}</span>/<span className="mono">{total}</span> sent
                       </span>
                     ) : null}
+                    {showPauseContinue ? (
+                      <button
+                        type="button"
+                        className="navLink"
+                        disabled={isPauseResumeLoading}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onCardPauseResume(c.id, state);
+                        }}
+                        style={{
+                          borderColor: state === 'paused' ? 'rgba(34, 197, 94, 0.25)' : 'rgba(59, 130, 246, 0.25)',
+                          background: state === 'paused' ? 'rgba(34, 197, 94, 0.08)' : 'rgba(59, 130, 246, 0.08)',
+                        }}
+                      >
+                        {isPauseResumeLoading ? '…' : state === 'paused' ? 'Continue' : 'Pause'}
+                      </button>
+                    ) : null}
                   </div>
                   <span className="navLink" style={{ padding: '8px 10px' }}>
                     View →
                   </span>
                 </div>
-              </button>
+              </div>
             );
           })
         )}
